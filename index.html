@@ -325,7 +325,7 @@
   </button>
   <button class="nav-item" data-view="compare">
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1.5" y="2" width="5" height="11" rx="1"/><rect x="8.5" y="2" width="5" height="11" rx="1"/></svg>
-    Compare <span class="badge" id="cmpBadge" hidden>0</span>
+    Machine finder <span class="badge" id="cmpBadge" hidden>0</span>
   </button>
   <div class="nav-foot">Sample dataset for prototype purposes. Supplier list prices collected July 2026 — verify before purchase.</div>
 </nav>
@@ -1757,6 +1757,7 @@ const S = {
   results: null,        // computed on "Get recommendations"
   compare: new Set(),
   machineFilter: "all",
+  finder: { power: "400", speed: "7", x: "100", y: "100", z: "100", run: false },
   query: "",
   openPowders: new Set(["ti64"]),
   openMakers: new Set(["eos"]),
@@ -2326,35 +2327,111 @@ function vCompanies() {
     <p class="datanote">Compiled July 2026 from web research; every website was verified to resolve. Companies marked “Public list” publish prices online — their prices feed the Powder library tables. The AM powder market also has additional regional producers (especially in China); this directory covers the companies most relevant to US buyers.</p>`;
 }
 
-/* ---------- compare ---------- */
+/* ---------- machine finder & compare ---------- */
+/* Parse catalog display strings into numbers. Returns null when the vendor publishes no usable spec. */
+function parseBuildStr(b) {
+  if (!b) return null;
+  const s = String(b).replace(/\(.*?\)/g, "");
+  const nums = (s.match(/\d+(?:\.\d+)?/g) || []).map(Number);
+  const round = /Ø/.test(s);
+  if (round && nums.length >= 2) return { round: true, d: nums[0], z: nums[1] };
+  if (!round && nums.length >= 3) return { round: false, x: nums[0], y: nums[1], z: nums[2] };
+  return null;
+}
+function parseLasersStr(l) {
+  if (!l || l === "—") return null;
+  const t = String(l).replace(/1\s*kW/gi, "1000 W");
+  const wMatches = [...t.matchAll(/(\d+(?:\.\d+)?)\s*W/g)].map(m => +m[1]);
+  if (!wMatches.length) return null;
+  const pre = t.split("×")[0];
+  const counts = (pre.match(/\d+/g) || []).map(Number).filter(n => n >= 1 && n <= 64);
+  return { n: counts.length ? Math.max(...counts) : 1, w: Math.max(...wMatches) };
+}
+
 function vCompare() {
-  const sel = PRINTERS.filter(m => S.compare.has(m.id));
-  if (!sel.length) {
-    main.innerHTML = `
-      <div class="topline"><h1>Compare machines</h1></div>
-      <p class="sub">Nothing selected yet. Add up to three machines from the selector or the database using the “+ Compare” button.</p>
-      <div class="empty">Your comparison list is empty.</div>`;
-    return;
+  const f = S.finder;
+  let resultsHtml = "";
+  if (f.run) {
+    const reqW = +f.power || 0, reqX = +f.x || 0, reqY = +f.y || 0, reqZ = +f.z || 0;
+    const hits = [];
+    let noSpec = 0;
+    for (const mfr of MFRS) for (const [mo, b, l, la, pr, no] of mfr.machines) {
+      const bld = parseBuildStr(b), las = parseLasersStr(l);
+      if (!bld || !las) { noSpec++; continue; }
+      const fits = bld.round
+        ? (reqX <= bld.d && reqY <= bld.d && reqZ <= bld.z)
+        : ((reqX <= bld.x && reqY <= bld.y) || (reqX <= bld.y && reqY <= bld.x)) && reqZ <= bld.z;
+      if (fits && las.w >= reqW) {
+        const vol = bld.round ? Math.PI / 4 * bld.d * bld.d * bld.z : bld.x * bld.y * bld.z;
+        hits.push({ mfr, mo, b, l, la, pr, no, vol, total: las.n * las.w });
+      }
+    }
+    hits.sort((a, c) => a.vol - c.vol);
+    const speedWarn = (+f.speed || 0) > 10
+      ? `<p class="datanote" style="color:var(--warn)">⚠ ${esc(f.speed)} m/s exceeds the ~7–10 m/s galvanometer limit of every conventional LPBF system — no machine meets this literally. Throughput beyond a single laser comes from multi-laser parallelism (see “Total power”).</p>`
+      : "";
+    resultsHtml = `
+    <section style="margin-top:26px">
+      <h2 style="font-size:16px;margin:0 0 4px">${hits.length} machine${hits.length === 1 ? "" : "s"} satisfy your inputs</h2>
+      <p class="sub" style="margin-bottom:10px">Sorted smallest sufficient build volume first. ${noSpec} catalog entries lack published build/laser specs and could not be evaluated.</p>
+      ${speedWarn}
+      ${hits.length ? `<div class="tablewrap"><table class="suptable">
+        <tr><th>Company</th><th>Model</th><th>Build (mm)</th><th>Lasers</th><th>Total power</th><th>Layer (µm)</th><th>Price</th><th>Link</th></tr>
+        ${hits.map(h => `<tr>
+          <td style="white-space:nowrap">${h.mfr.name}</td>
+          <td style="white-space:nowrap;font-weight:600">${h.mo}</td>
+          <td style="white-space:nowrap"><span class="num">${h.b}</span></td>
+          <td style="white-space:nowrap"><span class="num">${h.l}</span></td>
+          <td style="white-space:nowrap"><span class="num">${(h.total / 1000).toFixed(1).replace(".0", "")} kW</span></td>
+          <td style="white-space:nowrap"><span class="num">${h.la}</span></td>
+          <td style="white-space:nowrap">${h.pr && h.pr !== "RFQ" && h.pr !== "—" ? `<span class="pricelb">${h.pr}</span>` : `<span class="availpill quote">RFQ</span>`}</td>
+          <td><a href="${h.mfr.url}" target="_blank" rel="noopener">Visit ↗</a></td>
+        </tr>`).join("")}
+      </table></div>` : `<div class="empty">No machine in the catalog meets these requirements. Try lowering the laser power or part size.</div>`}
+      <p class="datanote">Scanning speed note: vendors almost never publish maximum scan speed — modern galvo-based LPBF systems all scan at roughly 7–10 m/s regardless of brand, so machines are matched on laser power and build size, and total installed power (lasers × watts) is shown as the practical throughput proxy.</p>
+    </section>`;
   }
-  const rows = [
+
+  const sel = PRINTERS.filter(m => S.compare.has(m.id));
+  const cmpRows = [
     ["Manufacturer", m => m.maker],
-    ["Class", m => m.cls],
     ["Build volume", m => `<span class="num">${m.build.join(" × ")} mm</span>`],
     ["Lasers", m => `<span class="num">${m.nLasers} × ${m.power} W</span>`],
     ["Layer thickness", m => `<span class="num">${m.layer}</span>`],
     ["Indicative price", m => `<span class="num">${fmtPrice(m.price)}</span>`],
     ["Validated powders", m => m.validated.map(id => POWDERS.find(p => p.id === id).name).join(", ")],
-    ["Best suited to", m => m.apps.map(a => APPS.find(x => x.id === a)?.label).filter(Boolean).join(", ")],
     ["Notes", m => m.notes],
   ];
+  const compareHtml = sel.length ? `
+    <section style="margin-top:34px">
+      <h2 style="font-size:16px;margin:0 0 4px">Side-by-side compare</h2>
+      <p class="sub" style="margin-bottom:10px">${sel.length} of 3 slots used — added via “+ Compare” in the Guided selector.</p>
+      <div class="tablewrap"><table>
+        <tr><th></th>${sel.map(m => `<th>${m.name}<br><span style="text-transform:none;letter-spacing:0;font-weight:400">${m.maker}</span><br>
+          <button class="rm" data-rm="${m.id}">remove</button></th>`).join("")}</tr>
+        ${cmpRows.map(([k, fn]) => `<tr><td class="k">${k}</td>${sel.map(m => `<td>${fn(m)}</td>`).join("")}</tr>`).join("")}
+      </table></div>
+    </section>` : "";
+
   main.innerHTML = `
-    <div class="topline"><h1>Compare machines</h1></div>
-    <p class="sub">${sel.length} of 3 slots used.</p>
-    <div class="tablewrap"><table>
-      <tr><th></th>${sel.map(m => `<th>${m.name}<br><span style="text-transform:none;letter-spacing:0;font-weight:400">${m.maker}</span><br>
-        <button class="rm" data-rm="${m.id}">remove</button></th>`).join("")}</tr>
-      ${rows.map(([k, fn]) => `<tr><td class="k">${k}</td>${sel.map(m => `<td>${fn(m)}</td>`).join("")}</tr>`).join("")}
-    </table></div>`;
+    <div class="topline"><h1>Machine finder</h1></div>
+    <p class="sub">Enter your requirements — the finder searches all ${MFRS.reduce((n, m) => n + m.machines.length, 0)} catalog machines and returns those that satisfy them.</p>
+    <div class="formgrid">
+      <div class="field"><label>Min. laser power (W per laser)</label><input id="fPow" type="number" min="0" step="50" value="${escA(f.power)}"></div>
+      <div class="field"><label>Scanning speed (m/s)</label><input id="fSpd" type="number" min="0" step="1" value="${escA(f.speed)}"></div>
+    </div>
+    <div class="formgrid" style="margin-top:14px">
+      <div class="field"><label>Part size X (mm)</label><input id="fX" type="number" min="1" value="${escA(f.x)}"></div>
+      <div class="field"><label>Part size Y (mm)</label><input id="fY" type="number" min="1" value="${escA(f.y)}"></div>
+      <div class="field"><label>Part size Z (mm)</label><input id="fZ" type="number" min="1" value="${escA(f.z)}"></div>
+    </div>
+    <div class="wizfoot"><button class="btn primary" id="fRun">Find machines</button></div>
+    ${resultsHtml}
+    ${compareHtml}`;
+
+  const bindF = (id, key) => { const el = document.getElementById(id); el.oninput = () => { S.finder[key] = el.value; }; };
+  bindF("fPow", "power"); bindF("fSpd", "speed"); bindF("fX", "x"); bindF("fY", "y"); bindF("fZ", "z");
+  document.getElementById("fRun").onclick = () => { S.finder.run = true; render(); };
   main.querySelectorAll("[data-rm]").forEach(b => b.onclick = () => { S.compare.delete(b.dataset.rm); render(); });
 }
 
